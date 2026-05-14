@@ -151,12 +151,108 @@ def run_mqtt_listener():
     print("[Listener] Connecting to MQTT...")
     listener.loop_forever()
 
+# ─── TELEGRAM ALERT THREAD ────────────────────────────────
+BOT_TOKEN = "8856869624:AAEdNKimQsENol5gUGdlyQwLCKoXf_b6Syg"
+CHAT_ID   = "1480220606"
+
+def send_telegram(text):
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={"chat_id": CHAT_ID, "text": text},
+            timeout=5
+        )
+        print(f"[Telegram] Sent: {text[:50]}...")
+    except Exception as e:
+        print(f"[Telegram] Error: {e}")
+
+def run_alert_bot():
+    print("[AlertBot] Starting...")
+    time.sleep(10)
+    alerted_critical = set()
+    alerted_low      = set()
+    station_alerted  = set()
+
+    while True:
+        try:
+            # Vehicle alerts
+            r = requests.get(
+                SB_URL + "/rest/v1/battery_telemetry?select=*&order=created_at.desc&limit=600",
+                headers=SB_HEADERS, timeout=5
+            )
+            rows = r.json()
+            latest = {}
+            for row in rows:
+                if row["vehicle_id"] not in latest:
+                    latest[row["vehicle_id"]] = row
+
+            for vid, row in latest.items():
+                soh     = round(row["soh"], 1)
+                voltage = round(row["voltage"], 2)
+                temp    = round(row["temp"], 1)
+
+                if soh < 25 and vid not in alerted_critical:
+                    msg = (
+                        f"🚨 VoltGuard CRITICAL ALERT!\n\n"
+                        f"Vehicle: {vid}\n"
+                        f"Battery SOH: {soh}%\n"
+                        f"Voltage: {voltage}V\n"
+                        f"Temp: {temp}°C\n\n"
+                        f"⚠️ ACTION: Swap battery immediately!\n"
+                        f"📍 Nearest Station: Anna Nagar (1.2km)\n"
+                        f"✅ Available batteries: 5"
+                    )
+                    send_telegram(msg)
+                    alerted_critical.add(vid)
+                    alerted_low.discard(vid)
+
+                elif soh < 50 and vid not in alerted_low and vid not in alerted_critical:
+                    msg = (
+                        f"⚠️ VoltGuard LOW BATTERY WARNING!\n\n"
+                        f"Vehicle: {vid}\n"
+                        f"Battery SOH: {soh}%\n\n"
+                        f"Plan a swap within 2 hours."
+                    )
+                    send_telegram(msg)
+                    alerted_low.add(vid)
+
+                elif soh >= 50:
+                    alerted_critical.discard(vid)
+                    alerted_low.discard(vid)
+
+            # Station alerts
+            rs = requests.get(
+                SB_URL + "/rest/v1/swap_stations?select=*",
+                headers=SB_HEADERS, timeout=5
+            )
+            for s in rs.json():
+                sid = s["station_id"]
+                if s["charged_batteries"] <= 1 and sid not in station_alerted:
+                    msg = (
+                        f"🔴 VoltGuard STATION LOW STOCK!\n\n"
+                        f"Station: {s['station_name']}\n"
+                        f"Charged batteries left: {s['charged_batteries']}\n\n"
+                        f"⚠️ Restock this station immediately!"
+                    )
+                    send_telegram(msg)
+                    station_alerted.add(sid)
+                elif s["charged_batteries"] > 3:
+                    station_alerted.discard(sid)
+
+            print(f"[AlertBot] Checked | Vehicles: {len(latest)}")
+
+        except Exception as e:
+            print(f"[AlertBot] Error: {e}")
+
+        time.sleep(15)
+
 # ─── START ALL BACKGROUND THREADS ON STARTUP ──────────────
 @app.on_event("startup")
 def startup_event():
     threading.Thread(target=run_simulator,         daemon=True).start()
     threading.Thread(target=run_mqtt_listener,     daemon=True).start()
     threading.Thread(target=run_station_simulator, daemon=True).start()
+    threading.Thread(target=run_alert_bot,         daemon=True).start()
     print("[VoltGuard] All background services started!")
 
 # ─── API ENDPOINTS ────────────────────────────────────────
